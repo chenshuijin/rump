@@ -1,9 +1,10 @@
 package main
 
 import (
-	"os"
-	"fmt"
 	"flag"
+	"fmt"
+	"os"
+
 	"github.com/garyburd/redigo/redis"
 )
 
@@ -16,10 +17,10 @@ func handle(err error) {
 }
 
 // Scan and queue source keys.
-func get(conn redis.Conn, queue chan<- map[string]string) {
+func get(conn redis.Conn, queue chan<- map[string][]byte) {
 	var (
 		cursor int64
-		keys []string
+		keys   []string
 	)
 
 	for {
@@ -28,18 +29,14 @@ func get(conn redis.Conn, queue chan<- map[string]string) {
 		handle(err)
 		values, err = redis.Scan(values, &cursor, &keys)
 		handle(err)
-
+		batch := make(map[string][]byte)
 		// Get pipelined dumps.
-		for _, key := range keys {
-			conn.Send("DUMP", key)
-		}
-		dumps, err := redis.Strings(conn.Do(""))
-		handle(err)
-
-		// Build batch map.
-		batch := make(map[string]string)
-		for i, _ := range keys {
-			batch[keys[i]] = dumps[i]
+		for i, key := range keys {
+			fmt.Println("key:", key)
+			dumps, err := redis.Bytes(conn.Do("GET", key))
+			handle(err)
+			// Build batch map.
+			batch[keys[i]] = dumps
 		}
 
 		// Last iteration of scan.
@@ -59,13 +56,12 @@ func get(conn redis.Conn, queue chan<- map[string]string) {
 }
 
 // Restore a batch of keys on destination.
-func put(conn redis.Conn, queue <-chan map[string]string) {
+func put(conn redis.Conn, queue <-chan map[string][]byte) {
 	for batch := range queue {
 		for key, value := range batch {
-			conn.Send("RESTORE", key, "0", value)
+			_, err := conn.Do("SETEX", key, 86400, value)
+			handle(err)
 		}
-		_, err := conn.Do("")
-		handle(err)
 
 		fmt.Printf(".")
 	}
@@ -84,7 +80,7 @@ func main() {
 	defer destination.Close()
 
 	// Channel where batches of keys will pass.
-	queue := make(chan map[string]string, 100)
+	queue := make(chan map[string][]byte, 100)
 
 	// Scan and send to queue.
 	go get(source, queue)
